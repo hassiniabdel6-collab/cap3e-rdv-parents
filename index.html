@@ -641,6 +641,16 @@
     <button class="slot-btn" onclick="exportAltCSV()">Exporter en CSV (Excel)</button>
     <div id="adminAltContent"></div>
 
+    <h3 class="admin-subhead">👥 Suivi de la classe</h3>
+    <p style="font-size:13px;color:var(--taupe);line-height:1.6;margin:0 0 14px;">Colle la liste des élèves (un par ligne). Elle reste enregistrée uniquement dans ce navigateur : jamais en ligne, jamais visible des familles. Pense à l'effacer si tu utilises un ordinateur partagé.</p>
+    <div class="field">
+      <textarea id="rosterInput" rows="6" placeholder="NOM Prénom (un élève par ligne)"></textarea>
+    </div>
+    <button class="slot-btn" onclick="saveRoster()">Enregistrer la liste</button>
+    <button class="slot-btn" onclick="exportRosterCSV()">Exporter le suivi (CSV)</button>
+    <button class="slot-btn" style="background:var(--brick);" onclick="clearRoster()">Effacer la liste</button>
+    <div id="rosterContent"></div>
+
     <p style="margin-top:20px;">
       <a style="cursor:pointer;color:var(--navy-soft);" onclick="closeAdmin()">← Retour au planning</a>
       &nbsp;·&nbsp;
@@ -664,15 +674,17 @@
    "Réinitialiser pour une nouvelle session" dans Accès enseignant.
    ====================================================================== */
 const CONFIG = {
-  formTitle: "Remise des bulletins S1 3G",
-  formSubtitle: "Je vous invite à réserver votre rendez-vous pour échanger sur le bilan du 1er semestre de votre enfant",
-  teacherLine: "M. Hassini — Professeur principal de 3G",
+  formTitle: "Bilan mi-semestre S1 3C",
+  formSubtitle: "Je vous invite à réserver votre rendez-vous pour échanger sur le bilan de mi-semestre de votre enfant",
+  teacherLine: "M. Hassini — Professeur principal de 3C",
   room: "Salle 104",
-  eventDateLabel: "Mardi 17 février 2026",
+  eventDateLabel: "Jeudi 12 novembre 2026",
+  eventName: "Le bilan de mi-semestre (S1)",   // phrase d'introduction : « [eventName] se déroulera le … »
+  eventStartLabel: "15h30",                                          // heure de début affichée aux parents
   slotDuration: 10, // minutes par créneau
   days: [
-    { date: "2026-02-17", label: "Mardi 17 février 2026", start: "08:10", end: "12:00" }
-    // 23 créneaux de 10 min entre 08:10 et 12:00.
+    { date: "2026-11-12", label: "Jeudi 12 novembre 2026", start: "15:30", end: "19:20" }
+    // 23 créneaux de 10 min entre 15:30 et 19:20 (le dernier commence à 19:10).
     // Pour une autre session, ajoute une ligne ici avec une autre date/plage horaire.
   ]
 };
@@ -1031,6 +1043,7 @@ async function refreshAdminData(){
   await loadAdminAltRequests();
   renderAdmin();
   renderAdminAlt();
+  renderRoster();
 }
 
 async function loadAdminBookings(){
@@ -1118,6 +1131,7 @@ async function cancelAltRequest(id){
   }
   await loadAdminAltRequests();
   renderAdminAlt();
+  renderRoster();
 }
 
 async function resetForNewSession(){
@@ -1151,7 +1165,156 @@ async function cancelBooking(key){
   }
   await loadAdminBookings();
   renderAdmin();
+  renderRoster();
   await loadBookings();
+}
+
+/* ---------- SUIVI DE LA CLASSE (liste locale, jamais envoyée en ligne) ---------- */
+const ROSTER_KEY = "rdv_roster_v1";
+let roster = [];
+let rosterLoaded = false;
+
+function ensureRosterLoaded(){
+  if(rosterLoaded) return;
+  rosterLoaded = true;
+  try{
+    roster = JSON.parse(localStorage.getItem(ROSTER_KEY) || "[]");
+    if(!Array.isArray(roster)) roster = [];
+  }catch(e){
+    roster = [];
+  }
+  document.getElementById("rosterInput").value = roster.join("\n");
+}
+
+function saveRoster(){
+  ensureRosterLoaded();
+  const seen = new Set();
+  roster = document.getElementById("rosterInput").value
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l && !seen.has(l.toLowerCase()) && seen.add(l.toLowerCase()));
+  try{ localStorage.setItem(ROSTER_KEY, JSON.stringify(roster)); }catch(e){
+    alert("Impossible d'enregistrer la liste dans ce navigateur.");
+  }
+  document.getElementById("rosterInput").value = roster.join("\n");
+  renderRoster();
+}
+
+function clearRoster(){
+  ensureRosterLoaded();
+  if(!confirm("Effacer la liste des élèves de ce navigateur ?")) return;
+  roster = [];
+  try{ localStorage.removeItem(ROSTER_KEY); }catch(e){}
+  document.getElementById("rosterInput").value = "";
+  renderRoster();
+}
+
+function normTokens(s){
+  return String(s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ").filter(Boolean);
+}
+
+// Même élève si tous les mots du nom le plus court se retrouvent dans l'autre (ordre libre, accents ignorés)
+function sameStudent(a, b){
+  if(!a.length || !b.length) return false;
+  const [small, big] = a.length <= b.length ? [a, b] : [b, a];
+  return small.every(t => big.includes(t));
+}
+
+function computeRosterStatus(){
+  ensureRosterLoaded();
+  const rosterTok = roster.map(normTokens);
+  const assign = items => {
+    const byIndex = {};
+    const orphans = [];
+    items.forEach(row => {
+      const tok = normTokens(row.student_name);
+      const hits = [];
+      rosterTok.forEach((t, i) => { if(sameStudent(t, tok)) hits.push(i); });
+      if(hits.length === 1){ (byIndex[hits[0]] = byIndex[hits[0]] || []).push(row); }
+      else orphans.push(row); // aucun élève, ou plusieurs possibles : à vérifier à la main
+    });
+    return { byIndex, orphans };
+  };
+  const b = assign(adminBookings);
+  const a = assign(adminAltRequests);
+  const rows = roster.map((name, i) => ({
+    name,
+    booking: (b.byIndex[i] || [])[0] || null,
+    alt: (a.byIndex[i] || [])[0] || null
+  })).sort((x, y) => x.name.localeCompare(y.name, "fr"));
+  return { rows, orphanBookings: b.orphans, orphanAlts: a.orphans };
+}
+
+function rosterStatusLabel(r){
+  if(r.booking){
+    const time = String(r.booking.slot_key).split("T")[1] || "";
+    return { text: "✅ Réservé · " + time, color: "var(--sage)" };
+  }
+  if(r.alt) return { text: "📞 Demande hors créneaux · " + r.alt.request_type, color: "var(--navy-soft)" };
+  return { text: "⏳ Pas de réponse", color: "var(--brick)" };
+}
+
+function renderRoster(){
+  const el = document.getElementById("rosterContent");
+  if(!el) return;
+  ensureRosterLoaded();
+  if(roster.length === 0){
+    el.innerHTML = `<p class="empty-note">Aucune liste chargée pour le moment.</p>`;
+    return;
+  }
+  const { rows, orphanBookings, orphanAlts } = computeRosterStatus();
+  const booked = rows.filter(r => r.booking).length;
+  const altOnly = rows.filter(r => !r.booking && r.alt).length;
+  const none = rows.length - booked - altOnly;
+
+  let html = `<p style="margin:14px 0 4px;font-size:13px;color:var(--navy-soft);">
+    <strong>${booked}/${rows.length}</strong> familles ont réservé · ${altOnly} demande(s) hors créneaux · <strong style="color:var(--brick);">${none}</strong> sans réponse</p>`;
+  html += `<table class="admin-table"><thead><tr><th>Élève</th><th>Statut</th></tr></thead><tbody>`;
+  rows.forEach(r => {
+    const s = rosterStatusLabel(r);
+    html += `<tr><td>${escapeHtml(r.name)}</td><td style="color:${s.color};">${escapeHtml(s.text)}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+
+  const orphans = [...orphanBookings, ...orphanAlts];
+  if(orphans.length){
+    html += `<p style="margin:16px 0 4px;font-size:12.5px;color:var(--taupe);">À vérifier : ${orphans.length} saisie(s) non rattachée(s) à la liste (orthographe ou nom incomplet) :
+      ${orphans.map(o => escapeHtml(o.student_name)).join(" ; ")}</p>`;
+  }
+  el.innerHTML = html;
+}
+
+function exportRosterCSV(){
+  ensureRosterLoaded();
+  if(roster.length === 0){
+    alert("Aucune liste d'élèves à exporter.");
+    return;
+  }
+  const { rows } = computeRosterStatus();
+  const out = [["Élève","Statut","Créneau","Responsable"]];
+  rows.forEach(r => {
+    const s = rosterStatusLabel(r);
+    out.push([
+      r.name,
+      s.text.replace(/^[^\wÀ-ÿ]+/u, "").split(" · ")[0],
+      r.booking ? (String(r.booking.slot_key).split("T")[1] || "") : "",
+      r.booking ? r.booking.parent_name : (r.alt ? r.alt.parent_name : "")
+    ]);
+  });
+  const csv = out.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(";")).join("\r\n");
+  const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `suivi_classe_${CONFIG.formTitle.replace(/[^a-z0-9]+/gi,"_")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function escapeHtml(str){
@@ -1293,7 +1456,7 @@ function renderIntroBox(){
 
   box.innerHTML = `
     <p>Chers parents,</p>
-    <p>La remise des bulletins du 1<sup>er</sup> semestre se déroulera le <strong>${CONFIG.eventDateLabel}</strong> en <strong>${CONFIG.room}</strong>.</p>
+    <p>${CONFIG.eventName} se déroulera le <strong>${CONFIG.eventDateLabel}</strong> à partir de <strong>${CONFIG.eventStartLabel}</strong> en <strong>${CONFIG.room}</strong>.</p>
     <p>Je vous invite à réserver un créneau ci-dessous pour discuter du bilan de votre enfant.</p>
     <div class="intro-meta">
       <div class="meta-item">${iconCalendar}<div><span class="meta-label">Date</span><span class="meta-value">${CONFIG.eventDateLabel}</span></div></div>
@@ -1313,15 +1476,11 @@ function renderIntroBox(){
   await restoreAdminSession();
   document.getElementById("loadingNote").style.display="none";
 
-  if(isAdminAuthenticated){
-    document.getElementById("adminPanel").classList.add("show");
-    document.getElementById("adminLoginView").style.display="none";
-    document.getElementById("adminContentView").style.display="block";
-    await refreshAdminData();
-  }else{
-    document.getElementById("bookingView").style.display="block";
-    renderAll();
-  }
+  // La page s'ouvre toujours sur le planning (vue des parents).
+  // Si une session enseignant est restaurée, « Accès enseignant » ouvre directement
+  // l'espace enseignant, sans ressaisir e-mail ni mot de passe.
+  document.getElementById("bookingView").style.display="block";
+  renderAll();
 })();
 </script>
 
